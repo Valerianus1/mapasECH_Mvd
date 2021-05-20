@@ -1,0 +1,129 @@
+library(tidyverse)
+library(foreign)
+library(ggmap)
+library(maptools) #resuelve un problema al usar la funcion tidy con un SpatialPolygonsDataFrame
+library(rgdal) #for readOGR function
+library(broom) #for tidy function
+library(raster)
+library(sp)
+library(maps)
+library(ggridges)
+library(gtable)
+library(grid)
+library(sf)
+
+#data <- read.spss("H_2019_Terceros.sav", to.data.frame=TRUE)
+# sum(as_tibble(datos2019_) %>% filter(nper==1) %>% dplyr::select(pesoano) == datos2019hogar$pesoano)
+# [1] 42507
+# los pesos de la hoja de hogares son los mismos de los del primer individuo del hogar
+
+shapesCCZ <- raster::shapefile('mapas\\mapaCCZ\\ZonasComunales.shp') #descargado de https://mapas.mides.gub.uy/
+shapesBarrios <- raster::shapefile('mapas\\mapabarrios\\barrios_ine_uy.shp') #descargado de https://sig.montevideo.gub.uy/
+
+my_spdf <- readOGR(dsn= "mapas\\mapaCCZ", layer="ZonasComunales",  verbose=F)
+
+mapMVD <- get_stamenmap(bbox=c(left=-56.4316, top=-34.7, bottom=-34.9385, right=-56.02), maptype="toner", zoom=10, crop=T)
+
+# transformar coordenadas y graficar
+proj4string(shapesCCZ) <- CRS("+init=epsg:32721") 
+shapesCCZ2 <- spTransform(shapesCCZ, CRS("+init=epsg:4326"))
+dpts <- ggplot2::fortify(shapesCCZ2)
+ggmap(mapMVD) +
+  geom_polygon(data = dpts, aes(x = long, y = lat, group = group, col = factor(group), fill=factor(group)), alpha=.5) +
+  theme(legend.position = "none") +
+  labs(title="Mapa CCZs de Montevideo superpuesto sobre un mapa de Stamen maps")
+
+spdf2_fortified <- tidy(my_spdf, region = "ZONA_LEGAL")
+spdf2_fortified$id <-as.numeric(str_sub(spdf2_fortified$id, -1))
+spdf2_fortified$cczid <- as.integer(gsub("\\[0-9\\]*", "", str_sub(spdf2_fortified$group, 4, length(spdf2_fortified$group))))
+
+ggplot() +
+  geom_polygon(data = spdf2_fortified, aes(x = long, y = lat, group = group, col = factor(group), fill=factor(group)),  alpha=.85) +
+  theme_void()
+
+datos2019_ <- read_csv2("HyP_2019_Terceros.csv", locale=locale(encoding="latin1"))
+datos2019hogar <- datos2019_ %>% dplyr::select(1:indigente06) %>% filter(nper==1) %>% dplyr::select(-anio, -mes, -numero, -nper) #solo 1 respuesta por hogar y sin preguntas personales
+datos2019hogar <-  mutate(datos2019hogar,"id"=1:nrow(datos2019hogar)) %>% dplyr::select(id, everything())
+datosMVD <- filter(datos2019hogar, dpto=="Montevideo")
+rm(datos2019, datos2019_, datos2019hogar)
+datosMVD$nombarrio <- gsub("¦", "n", datosMVD$nombarrio)
+datosMVD$nombarrio <- gsub(",", " -", datosMVD$nombarrio)
+datosMVD$nombarrio <- gsub("ñ", " n", datosMVD$nombarrio)
+
+cczmunicipiomatch <- data.frame(
+  ccz = c(1:18),
+  municipio=c("B","B","C","CH","CH","E","E","E","F","D","D","G","G","A","C","C","A","A")
+)
+match <- match(datosMVD$ccz, cczmunicipiomatch$ccz)
+cczmunicipiomatch2 <- cczmunicipiomatch[match, ]
+datosMVD$municipio <- cczmunicipiomatch2$municipio
+spdf2_fortified <- spdf2_fortified %>% left_join(cczmunicipiomatch, by=c("cczid"="ccz"))
+
+resumen <- datosMVD %>% group_by(nombarrio) %>% 
+  summarize(
+    n = n(),
+    vehiculos = weighted.mean(d21_18_1, w=pesoano, na.rm=T),
+    motos = weighted.mean(d21_19_1, w=pesoano, na.rm=T),
+    streaming = weighted.mean(c("No" = F, "Sí" = T, "Sin dato" = NA)[d21_21], w=pesoano, na.rm=T),
+    tvcable = weighted.mean(c("No" = F, "Sí" = T, "Sin dato" = NA)[d21_7], w=pesoano, na.rm=T),
+    hgrsRemesa = weighted.mean(c("No" = F, "Sí" = T, "Sin dato" = NA)[h172], w=pesoano, na.rm=T),
+    montoRemesa = weighted.mean(h172_1, w=pesoano, na.rm=T),
+    ht19 = weighted.mean(ht19, w=pesoano, na.rm=T)
+  ) %>% mutate(nombarrio_upper = str_to_upper(nombarrio))
+
+barriosSPDF <- readOGR(dsn= "mapas\\mapabarrios", layer="barrios_ine_uy",  verbose=F)
+dfBarrios_fortified <- tidy(barriosSPDF, region = "nombbarr") #para algunas variables espeficadas como "region" es necesario tener cargado el paquete maptools
+dfBarrios_fortified$id <- gsub("Ñ", "N", dfBarrios_fortified$id)
+dfBarrios_fortified <- left_join(dfBarrios_fortified, resumen, by=c("id"="nombarrio_upper"))
+
+#usado para hallar incongruencias en nombres de barrios en ECH y shapefile
+nronombrebarrios <-  left_join(as_tibble(unique(datosMVD$barrio)), dplyr::distinct(dplyr::select(datosMVD, barrio, nombarrio)), by=c("value"="barrio"))
+anti_join(as_tibble(str_to_lower(nronombrebarrios$nombarrio)), as_tibble(str_to_lower(dfBarrios_fortified$id)), by="value")
+
+mapaPNG <- function(df, var, title, long=long, lat=lat, group=group, path="") {
+  var=enquo(var)
+  long=enquo(long)
+  lat=enquo(lat)
+  group=enquo(group)
+  print(paste0(var, ".png")[2])
+  ggp <- ggplot()+
+    geom_polygon(data=df, aes(x = !! long, y = !! lat, group =  !! group, fill = !! var, col =  !! var)) +
+    coord_equal() +
+    scale_colour_viridis_c(name=element_blank()) +
+    scale_fill_viridis_c(name=element_blank()) +
+    ggtitle(title) +
+    theme_void()
+  return(ggp)
+}
+
+mapaPNG(dfBarrios_fortified, vehiculos, "Promedio de vehículos por hogar en cada barrio", path="plots\\")
+mapaPNG(dfBarrios_fortified, motos, "Ciclomotores por hogar en cada barrio", path="plots\\")
+mapaPNG(dfBarrios_fortified, streaming*100, "% de hogares con acceso a streaming en cada barrio", path="plots\\")
+mapaPNG(dfBarrios_fortified, tvcable*100, "% de hogares con acceso a TV cable en cada barrio", path="plots\\")
+mapaPNG(dfBarrios_fortified, hgrsRemesa*100, "% de hogares que recibieron alguna remesa", path="plots\\")
+mapaPNG(dfBarrios_fortified, montoRemesa, "Monto de remesas promedio recibido en cada barrio", path="plots\\")
+
+
+paraDist <- datosMVD %>% dplyr::select(municipio, ccz, ht19, HT11, ht2, ht3, ht4, pesoano) %>% na.omit() #HT11 es ingreso total con valor locativo sin servicio domestico; ht19 es total de personas en el hogar sin servicio domestico
+colnames(paraDist) <- c("municipio", "ccz", "totPersonas", "ingresoTot", "nMjrs", "nMenores14", "nMayores60", "pesoano")
+
+p1 <- ggplot()+ #mejor
+  geom_polygon(data = spdf2_fortified, aes(x = long, y = lat, group = group, fill=factor(municipio)),  alpha=.7) +
+  theme_void()
+p2 <- ggplot(paraDist, aes(x = round(ingresoTot/totPersonas), y = as.factor(municipio), fill = as.factor(municipio))) + #y debe ser un factor
+  geom_density_ridges(aes(height=..density.., weight=pesoano), stat="density") +
+  theme_ridges() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        legend.position = "none")+
+  labs(title = 'Distribucion ingreso pc de de los hogares por municipio') +
+  scale_x_continuous(
+    labels=function(n){format(n, scientific = FALSE)}, #si no pongo esto, figura como 3e+05...
+    limits=c(0,200000)) #esto es la razon del mensaje "Removed 122 rows containing non-finite values (stat_density_ridges)."
+
+g1 <- ggplot_gtable(ggplot_build(p1))
+g2 <- ggplot_gtable(ggplot_build(p2))
+pp <- c(subset(g2$layout, name == "panel", se = t:r))
+g <- gtable_add_grob(g2, g1$grobs[[which(g1$layout$name == "panel")]], pp$t, 
+                     pp$l, pp$b, pp$l, -Inf)
+grid.draw(g)
