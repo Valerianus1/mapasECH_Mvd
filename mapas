@@ -12,11 +12,6 @@ library(gtable)
 library(grid)
 library(sf)
 
-#data <- read.spss("H_2019_Terceros.sav", to.data.frame=TRUE)
-# sum(as_tibble(datos2019_) %>% filter(nper==1) %>% dplyr::select(pesoano) == datos2019hogar$pesoano)
-# [1] 42507
-# los pesos de la hoja de hogares son los mismos de los del primer individuo del hogar
-
 shapesCCZ <- raster::shapefile('mapas\\mapaCCZ\\ZonasComunales.shp') #descargado de https://mapas.mides.gub.uy/
 shapesBarrios <- raster::shapefile('mapas\\mapabarrios\\barrios_ine_uy.shp') #descargado de https://sig.montevideo.gub.uy/
 
@@ -41,7 +36,7 @@ ggplot() +
   geom_polygon(data = spdf2_fortified, aes(x = long, y = lat, group = group, col = factor(group), fill=factor(group)),  alpha=.85) +
   theme_void()
 
-datos2019_ <- read_csv2("HyP_2019_Terceros.csv", locale=locale(encoding="latin1"))
+datos2019_ <- read_csv2("HyP_2019_Terceros.csv", locale=locale(encoding="latin1")) # cargar datos ECH
 datos2019hogar <- datos2019_ %>% dplyr::select(1:indigente06) %>% filter(nper==1) %>% dplyr::select(-anio, -mes, -numero, -nper) #solo 1 respuesta por hogar y sin preguntas personales
 datos2019hogar <-  mutate(datos2019hogar,"id"=1:nrow(datos2019hogar)) %>% dplyr::select(id, everything())
 datosMVD <- filter(datos2019hogar, dpto=="Montevideo")
